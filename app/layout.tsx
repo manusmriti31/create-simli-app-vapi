@@ -7,8 +7,8 @@ import "./globals.css";
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "Simli App (Vapi)",
-  description: "create-simli-app (Vapi)",
+  title: "Interview.me",
+  description: "AI Mock Interview Platform",
 };
 
 export default function RootLayout({

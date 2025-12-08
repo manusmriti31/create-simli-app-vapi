@@ -29,6 +29,9 @@ const SimliVapi: React.FC<SimliVapiProps> = ({
   const [error, setError] = useState("");
   const doRunOnce = useRef(false);
 
+  // Ref to track if Vapi has already been started (prevents duplicate starts)
+  const vapiStartedRef = useRef(false);
+
   // Refs for media elements
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -66,6 +69,12 @@ const SimliVapi: React.FC<SimliVapiProps> = ({
     setError("");
     setIsAvatarVisible(false);
 
+    // Reset Vapi started flag
+    vapiStartedRef.current = false;
+
+    // Clean up Vapi
+    vapi.stop();
+
     // Clean up Simli client
     simliClient?.close();
 
@@ -82,8 +91,8 @@ const SimliVapi: React.FC<SimliVapiProps> = ({
         apiKey: process.env.NEXT_PUBLIC_SIMLI_API_KEY,
         faceID: simli_faceid,
         handleSilence: false,
-        videoRef: videoRef,
-        audioRef: audioRef,
+        videoRef: videoRef.current,
+        audioRef: audioRef.current,
       };
 
       simliClient.Initialize(SimliConfig as any);
@@ -95,16 +104,24 @@ const SimliVapi: React.FC<SimliVapiProps> = ({
    * Start Vapi interaction
    */
   const startVapiInteraction = async () => {
+    // Prevent multiple Vapi starts
+    if (vapiStartedRef.current) {
+      console.log("Vapi already started, skipping...");
+      return;
+    }
+
     try {
+      vapiStartedRef.current = true;
       await vapi.start(agentId);
       console.log("Vapi interaction started");
       eventListenerVapi();
     } catch (error: any) {
+      vapiStartedRef.current = false;
       console.error("Error starting Vapi interaction:", error);
       setError(`Error starting Vapi interaction: ${error.message}`);
     }
   };
-  
+
   /**
    * Mute Vapi internal audio and only keep simli's audio
    */
@@ -113,8 +130,36 @@ const SimliVapi: React.FC<SimliVapiProps> = ({
     for (let i = 0; i < audioElements.length; i++) {
       if (audioElements[i].id !== "simli_audio") {
         audioElements[i].muted = true;
+        audioElements[i].volume = 0;
+        audioElements[i].pause();
       }
     }
+
+    // Set up a MutationObserver to catch any new audio elements that get added
+    const observer = new MutationObserver((mutations) => {
+      mutations.forEach((mutation) => {
+        mutation.addedNodes.forEach((node) => {
+          if (node instanceof HTMLAudioElement && node.id !== "simli_audio") {
+            node.muted = true;
+            node.volume = 0;
+            node.pause();
+          }
+          // Also check children
+          if (node instanceof Element) {
+            const audioChildren = node.getElementsByTagName("audio");
+            for (let i = 0; i < audioChildren.length; i++) {
+              if (audioChildren[i].id !== "simli_audio") {
+                audioChildren[i].muted = true;
+                audioChildren[i].volume = 0;
+                audioChildren[i].pause();
+              }
+            }
+          }
+        });
+      });
+    });
+
+    observer.observe(document.body, { childList: true, subtree: true });
   };
 
   /**
@@ -126,6 +171,11 @@ const SimliVapi: React.FC<SimliVapiProps> = ({
       try {
         const dailyCall = vapi.getDailyCallObject();
         const participants = dailyCall?.participants();
+        if (!participants) {
+          console.log("No participants found, retrying...");
+          setTimeout(getAudioElementAndSendToSimli, 100);
+          return;
+        }
         Object.values(participants).forEach((participant) => {
           const audioTrack = participant.tracks.audio.track;
           if (audioTrack) {
@@ -197,9 +247,8 @@ const SimliVapi: React.FC<SimliVapiProps> = ({
   return (
     <>
       <div
-        className={`transition-all duration-300 ${
-          showDottedFace ? "h-0 overflow-hidden" : "h-auto"
-        }`}
+        className={`transition-all duration-300 ${showDottedFace ? "h-0 overflow-hidden" : "h-auto"
+          }`}
       >
         <VideoBox video={videoRef} audio={audioRef} />
       </div>
