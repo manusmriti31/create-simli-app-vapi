@@ -7,6 +7,11 @@ import { SimliClient } from "simli-client";
 import VideoBox from "./Components/VideoBox";
 import cn from "./utils/TailwindMergeAndClsx";
 import SimliHeaderLogo from "./Components/Logo";
+import Editor from "react-simple-code-editor";
+import { highlight, languages } from "prismjs";
+import "prismjs/components/prism-clike";
+import "prismjs/components/prism-javascript";
+import "prismjs/themes/prism-tomorrow.css"; // Dark theme for code
 
 /**
  * AI Mock Interviewer
@@ -40,6 +45,8 @@ export default function Page() {
   const [resumeName, setResumeName] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [code, setCode] = useState("// Write your code here...");
+  const [isSharing, setIsSharing] = useState(false);
 
   // Refs
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -112,6 +119,31 @@ export default function Page() {
       setError(`Error starting Vapi: ${error.message}`);
     }
   }, [name, resumeText]);
+
+  // --- Share Code with Vapi ---
+  const shareCodeWithAgent = async () => {
+    if (!code || isSharing) return;
+
+    setIsSharing(true);
+    try {
+      // Send the code as a system message to Vapi context
+      // This allows the agent to "see" the code
+      vapi.send({
+        type: "add-message",
+        message: {
+          role: "system",
+          content: `The candidate has written the following code:\n\n${code}\n\nPlease review it or ask questions about it.`
+        }
+      });
+      console.log("Code shared with Vapi agent");
+
+      // Optional: Give visual feedback
+      setTimeout(() => setIsSharing(false), 2000);
+    } catch (err) {
+      console.error("Failed to share code:", err);
+      setIsSharing(false);
+    }
+  };
 
   // --- Mute Vapi internal audio (same as original) ---
   const muteVapiInternalAudio = () => {
@@ -287,38 +319,80 @@ export default function Page() {
       {/* =============================================== */}
       <div
         className={cn(
-          "fixed inset-0 z-50 flex flex-col items-center justify-center bg-black transition-all duration-500",
+          "fixed inset-0 z-50 flex flex-col transition-all duration-500 bg-black",
           status === "active"
             ? "opacity-100 pointer-events-auto"
             : "opacity-0 pointer-events-none"
         )}
       >
-        {/* Glow Effect behind Avatar */}
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-indigo-900/20 rounded-full blur-[120px] pointer-events-none" />
+        {/* Main Split Layout - Centered Container */}
+        <div className="w-full h-full max-w-[1400px] mx-auto flex flex-col lg:flex-row items-center justify-center gap-8 p-6">
 
-        {/* Avatar Container - VideoBox is ALWAYS mounted here */}
-        <div className="relative z-10 scale-125 transform transition-all duration-700 ease-in-out">
-          <VideoBox video={videoRef} audio={audioRef} />
-        </div>
+          {/* LEFT PANEL: AVATAR */}
+          <div className="relative w-full lg:w-[500px] aspect-square flex flex-col items-center justify-center">
+            {/* Glow Effect */}
+            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[80%] h-[80%] bg-indigo-900/20 rounded-full blur-[80px] pointer-events-none" />
 
-        {/* Controls - Only shown when active */}
-        <div className="absolute bottom-12 z-20 flex items-center gap-4">
-          <div className="bg-white/10 backdrop-blur-md border border-white/5 px-6 py-3 rounded-full flex items-center gap-4">
-            <div className="flex items-center gap-2">
-              <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
-              <span className="text-white/80 text-sm font-medium">Live Interview</span>
+            <div className="relative z-10 w-full h-full rounded-xl overflow-hidden shadow-2xl border border-white/10 bg-gray-900/50">
+              <VideoBox video={videoRef} audio={audioRef} />
             </div>
-            <div className="h-4 w-[1px] bg-white/10" />
-            <button
-              onClick={handleStop}
-              className="text-red-400 hover:text-red-300 text-sm font-medium transition-colors"
-            >
-              End Call
-            </button>
+
+            {/* Controls */}
+            <div className="absolute -bottom-20 left-1/2 -translate-x-1/2 z-20 flex items-center gap-4 w-max">
+              <div className="bg-white/10 backdrop-blur-md border border-white/5 px-6 py-3 rounded-full flex items-center gap-4">
+                <div className="flex items-center gap-2">
+                  <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
+                  <span className="text-white/80 text-sm font-medium">Live Interview</span>
+                </div>
+                <div className="h-4 w-[1px] bg-white/10" />
+                <button
+                  onClick={handleStop}
+                  className="text-red-400 hover:text-red-300 text-sm font-medium transition-colors"
+                >
+                  End Call
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* RIGHT PANEL: CODE EDITOR */}
+          <div className="w-full lg:w-[500px] aspect-square flex flex-col bg-[#1e1e1e] rounded-xl overflow-hidden shadow-2xl border border-white/10 z-10">
+            <div className="flex items-center justify-between px-4 py-3 bg-[#252526] border-b border-black/50">
+              <span className="text-gray-400 text-xs font-medium uppercase tracking-wider">Scratchpad</span>
+              <button
+                onClick={shareCodeWithAgent}
+                disabled={isSharing}
+                className={cn(
+                  "px-3 py-1.5 rounded text-xs font-medium transition-all",
+                  isSharing
+                    ? "bg-emerald-500/20 text-emerald-400"
+                    : "bg-indigo-600 hover:bg-indigo-500 text-white"
+                )}
+              >
+                {isSharing ? "Shared!" : "Share Code"}
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-auto font-mono text-sm relative">
+              <Editor
+                value={code}
+                onValueChange={code => setCode(code)}
+                highlight={code => highlight(code, languages.js, "javascript")}
+                padding={16}
+                className="min-h-full font-mono"
+                textareaClassName="focus:outline-none"
+                style={{
+                  fontFamily: '"Fira Code", "Fira Mono", monospace',
+                  fontSize: 14,
+                  backgroundColor: "#1e1e1e",
+                  color: "#f8f8f2"
+                }}
+              />
+            </div>
           </div>
         </div>
 
-        <SimliHeaderLogo className="fixed top-8 left-8 opacity-50 hover:opacity-100 transition-opacity" />
+        <SimliHeaderLogo className="fixed top-6 left-6 z-50 opacity-50 hover:opacity-100 transition-opacity w-24" />
       </div>
 
       {/* =============================================== */}
