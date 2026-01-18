@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useRef, useCallback } from "react";
+import React, { useState, useRef, useCallback, useEffect } from "react";
 import pdfToText from "react-pdftotext";
 import Vapi from "@vapi-ai/web";
 import { SimliClient } from "simli-client";
@@ -32,6 +32,9 @@ const VAPI_KEY = process.env.NEXT_PUBLIC_VAPI_PUBLIC_KEY || process.env.NEXT_PUB
 const SIMLI_KEY = process.env.NEXT_PUBLIC_SIMLI_API_KEY || "";
 const SIMLI_FACE_ID = "5514e24d-6086-46a3-ace4-6a7264e5cb7c";
 const VAPI_ASSISTANT_ID = process.env.NEXT_PUBLIC_VAPI_AGENT_ID || "";
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || "https://hvmgmvsmyejlzjdtoomd.supabase.co";
+const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
+const TAVILY_API_KEY = process.env.NEXT_PUBLIC_TAVILY_API_KEY || "";
 
 // Module-level singletons (same pattern as original SimliVapi.tsx)
 const vapi = new Vapi(VAPI_KEY);
@@ -46,12 +49,32 @@ export default function Page() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [code, setCode] = useState("// Write your code here...");
+
+  // Company research state
+  const [companyName, setCompanyName] = useState("");
+  const [roleName, setRoleName] = useState("");
+  const [companyResearch, setCompanyResearch] = useState<string>("");
+  const [isResearching, setIsResearching] = useState(false);
   const [isSharing, setIsSharing] = useState(false);
 
   // Refs
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const vapiStartedRef = useRef(false);
+  const researchContextRef = useRef<string>("");
+  const listenersAttachedRef = useRef(false);
+
+  // Refs to track current state values for event handlers (avoids stale closures)
+  const nameRef = useRef(name);
+  const resumeRef = useRef(resumeText);
+  const companyRef = useRef(companyName);
+  const roleRef = useRef(roleName);
+
+  // Keep refs in sync with state
+  useEffect(() => { nameRef.current = name; }, [name]);
+  useEffect(() => { resumeRef.current = resumeText; }, [resumeText]);
+  useEffect(() => { companyRef.current = companyName; }, [companyName]);
+  useEffect(() => { roleRef.current = roleName; }, [roleName]);
 
   // --- PDF Handler ---
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -77,6 +100,65 @@ export default function Page() {
     }
   };
 
+  // --- Fetch Company Research from Edge Function ---
+  const fetchCompanyResearch = useCallback(async (): Promise<string> => {
+    if (!companyName || !roleName) {
+      console.log("Skipping company research - no company/role provided");
+      return "";
+    }
+
+    if (!TAVILY_API_KEY) {
+      console.log("Skipping company research - no Tavily API key configured");
+      return "";
+    }
+
+    setIsResearching(true);
+    try {
+      const response = await fetch(`${SUPABASE_URL}/functions/v1/company-research`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${SUPABASE_ANON_KEY}`,
+        },
+        body: JSON.stringify({
+          company: companyName,
+          role: roleName,
+          tavilyApiKey: TAVILY_API_KEY,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        console.error("Research fetch failed:", errorData);
+        throw new Error(errorData.error || "Failed to fetch company research");
+      }
+
+      const research = await response.json();
+      console.log("Company research fetched:", research);
+
+      // Format research for VAPI context
+      const formattedResearch = `
+## Company: ${research.company}
+## Role: ${research.role}
+
+### Research Summary:
+${research.summary}
+
+### Key Sources:
+${research.sources.map((s: { title: string; snippet: string }) => `- ${s.title}: ${s.snippet}`).join("\n")}
+      `.trim();
+
+      setCompanyResearch(formattedResearch);
+      return formattedResearch;
+    } catch (err: any) {
+      console.error("Company research error:", err);
+      setError(`Research failed: ${err.message}. Interview will proceed without company context.`);
+      return "";
+    } finally {
+      setIsResearching(false);
+    }
+  }, [companyName, roleName]);
+
   // --- Initialize Simli (same as original initializeSimliClient) ---
   const initializeSimliClient = useCallback(() => {
     if (videoRef.current && audioRef.current) {
@@ -93,7 +175,7 @@ export default function Page() {
   }, []);
 
   // --- Start Vapi (same as original startVapiInteraction) ---
-  const startVapiInteraction = useCallback(async () => {
+  const startVapiInteraction = useCallback(async (researchContext: string = "") => {
     if (vapiStartedRef.current) {
       console.log("Vapi already started, skipping...");
       return;
@@ -102,23 +184,25 @@ export default function Page() {
     try {
       vapiStartedRef.current = true;
 
-      // Pass variable values as required
+      // Pass variable values including company research
       const variableValues = {
         candidate_name: name,
         resume_text: resumeText,
+        company_name: companyName || "Not specified",
+        role_name: roleName || "Not specified",
+        company_research: researchContext || "No company research available.",
       };
 
+      console.log("Starting Vapi with variables:", { ...variableValues, resume_text: "[truncated]" });
       await vapi.start(VAPI_ASSISTANT_ID, { variableValues });
       console.log("Vapi interaction started");
-
-      // Attach Vapi event listeners AFTER starting
-      eventListenerVapi();
+      // Event listeners are now attached via useEffect, no need to call here
     } catch (error: any) {
       vapiStartedRef.current = false;
       console.error("Error starting Vapi interaction:", error);
       setError(`Error starting Vapi: ${error.message}`);
     }
-  }, [name, resumeText]);
+  }, [name, resumeText, companyName, roleName]);
 
   // --- Share Code with Vapi ---
   const shareCodeWithAgent = async () => {
@@ -212,8 +296,52 @@ export default function Page() {
     }
   };
 
-  // --- Vapi Event Listeners (same as original eventListenerVapi) ---
-  const eventListenerVapi = useCallback(() => {
+  // --- Setup Event Listeners ONCE on mount (truly stable - no dependencies) ---
+  useEffect(() => {
+    // Only attach once ever for the lifetime of module-level singletons
+    if (listenersAttachedRef.current) {
+      return;
+    }
+
+    console.log("Attaching event listeners (one-time setup)");
+    listenersAttachedRef.current = true;
+
+    // Simli "connected" - start VAPI after Simli is ready
+    simliClient.on("connected", () => {
+      console.log("SimliClient connected");
+      const audioData = new Uint8Array(6000).fill(0);
+      simliClient.sendAudioData(audioData);
+      console.log("Sent initial audio data");
+
+      // Start VAPI only if not already started
+      if (!vapiStartedRef.current) {
+        vapiStartedRef.current = true;
+
+        const variableValues = {
+          candidate_name: nameRef.current,
+          resume_text: resumeRef.current,
+          company_name: companyRef.current || "Not specified",
+          role_name: roleRef.current || "Not specified",
+          company_research: researchContextRef.current || "No company research available.",
+        };
+
+        console.log("Starting Vapi with variables:", { ...variableValues, resume_text: "[truncated]" });
+        vapi.start(VAPI_ASSISTANT_ID, { variableValues })
+          .then(() => console.log("Vapi interaction started"))
+          .catch((err: any) => {
+            vapiStartedRef.current = false;
+            console.error("Error starting Vapi interaction:", err);
+          });
+      }
+    });
+
+    // Simli "disconnected" - stop VAPI
+    simliClient.on("disconnected", () => {
+      console.log("SimliClient disconnected");
+      vapi.stop();
+    });
+
+    // Vapi "message" - clear Simli buffer when user speaks
     vapi.on("message", (message: any) => {
       if (
         message.type === "speech-update" &&
@@ -225,6 +353,7 @@ export default function Page() {
       }
     });
 
+    // Vapi "call-start" - pipe audio to Simli
     vapi.on("call-start", () => {
       console.log("Vapi call started");
       setStatus("active");
@@ -232,32 +361,16 @@ export default function Page() {
       getAudioElementAndSendToSimli();
     });
 
+    // Vapi "call-end" - reset state
     vapi.on("call-end", () => {
       console.log("Vapi call ended");
-      handleStop();
+      setIsLoading(false);
+      setStatus("lobby");
+      vapiStartedRef.current = false;
     });
-  }, []);
 
-  // --- Simli Event Listeners (same as original eventListenerSimli) ---
-  // CRITICAL: Vapi is started INSIDE the Simli "connected" callback
-  const eventListenerSimli = useCallback(() => {
-    if (simliClient) {
-      simliClient.on("connected", () => {
-        console.log("SimliClient connected");
-        const audioData = new Uint8Array(6000).fill(0);
-        simliClient.sendAudioData(audioData);
-        console.log("Sent initial audio data");
-
-        // START VAPI ONLY AFTER SIMLI IS CONNECTED
-        startVapiInteraction();
-      });
-
-      simliClient.on("disconnected", () => {
-        console.log("SimliClient disconnected");
-        vapi.stop();
-      });
-    }
-  }, [startVapiInteraction]);
+    // No cleanup - these are module-level singletons that persist
+  }, []); // Empty dependency array - runs once on mount
 
   // --- Start Interview (same flow as original handleStart) ---
   const handleStart = useCallback(async () => {
@@ -271,14 +384,24 @@ export default function Page() {
     setError(null);
 
     try {
+      // 0. Fetch company research (if company/role provided)
+      if (companyName && roleName && TAVILY_API_KEY) {
+        console.log("Fetching company research...");
+        const research = await fetchCompanyResearch();
+        researchContextRef.current = research;
+      } else {
+        console.log("Skipping company research (missing company, role, or API key)");
+        researchContextRef.current = "";
+      }
+
       // 1. Initialize Simli client
       initializeSimliClient();
 
       // 2. Request microphone access
       await navigator.mediaDevices.getUserMedia({ audio: true });
 
-      // 3. Attach Simli event listeners FIRST (so we don't miss "connected" event)
-      eventListenerSimli();
+      // 3. Event listeners are attached via useEffect (one-time setup)
+      // No need to call eventListenerSimli() here anymore
 
       // 4. Start Simli client (will trigger "connected" event)
       await simliClient.start();
@@ -289,7 +412,7 @@ export default function Page() {
       setIsLoading(false);
       setStatus("lobby");
     }
-  }, [name, resumeText, initializeSimliClient, eventListenerSimli]);
+  }, [name, resumeText, companyName, roleName, fetchCompanyResearch, initializeSimliClient]);
 
   // --- Stop Interview (same as original handleStop) ---
   const handleStop = useCallback(() => {
@@ -467,13 +590,69 @@ export default function Page() {
                     )}
                   </div>
                 </div>
-                {error && <p className="text-red-400 text-xs pl-1">{error}</p>}
               </div>
+
+              {/* Divider */}
+              <div className="relative">
+                <div className="absolute inset-0 flex items-center">
+                  <div className="w-full border-t border-white/10"></div>
+                </div>
+                <div className="relative flex justify-center text-xs">
+                  <span className="px-2 bg-gray-900/50 text-gray-500">Company Research (Optional)</span>
+                </div>
+              </div>
+
+              {/* Company & Role Inputs */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-2">
+                  <label className="text-xs font-medium text-gray-500 uppercase tracking-widest pl-1">
+                    Company
+                  </label>
+                  <input
+                    type="text"
+                    value={companyName}
+                    onChange={(e) => setCompanyName(e.target.value)}
+                    placeholder="Ex. Google"
+                    className="w-full bg-gray-950/50 border border-white/10 rounded-lg px-4 py-3 text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-transparent transition-all text-sm"
+                    disabled={isLoading}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-xs font-medium text-gray-500 uppercase tracking-widest pl-1">
+                    Role
+                  </label>
+                  <input
+                    type="text"
+                    value={roleName}
+                    onChange={(e) => setRoleName(e.target.value)}
+                    placeholder="Ex. Software Engineer"
+                    className="w-full bg-gray-950/50 border border-white/10 rounded-lg px-4 py-3 text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-transparent transition-all text-sm"
+                    disabled={isLoading}
+                  />
+                </div>
+              </div>
+
+              {/* Research status indicator */}
+              {companyName && roleName && TAVILY_API_KEY && (
+                <p className="text-emerald-400 text-xs pl-1 flex items-center gap-1">
+                  <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                  </svg>
+                  Company research will be included
+                </p>
+              )}
+              {companyName && roleName && !TAVILY_API_KEY && (
+                <p className="text-amber-400 text-xs pl-1">
+                  Configure NEXT_PUBLIC_TAVILY_API_KEY in .env to enable research
+                </p>
+              )}
+
+              {error && <p className="text-red-400 text-xs pl-1">{error}</p>}
 
               {/* Start Button */}
               <button
                 onClick={handleStart}
-                disabled={!name || !resumeText || isLoading}
+                disabled={!name || !resumeText || isLoading || isResearching}
                 className={cn(
                   "w-full py-4 rounded-lg font-medium text-white transition-all duration-300 transform",
                   (!name || !resumeText)
@@ -481,13 +660,13 @@ export default function Page() {
                     : "bg-gradient-to-r from-indigo-600 to-violet-600 hover:shadow-lg hover:shadow-indigo-500/20 hover:scale-[1.02] active:scale-[0.98]"
                 )}
               >
-                {isLoading ? (
+                {isLoading || isResearching ? (
                   <span className="flex items-center justify-center gap-2">
                     <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                       <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                       <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                     </svg>
-                    Connecting...
+                    {isResearching ? "Researching Company..." : "Connecting..."}
                   </span>
                 ) : "Start Interview"}
               </button>
